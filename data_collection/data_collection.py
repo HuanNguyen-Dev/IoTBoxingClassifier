@@ -3,6 +3,10 @@ import struct
 import time
 import statistics
 from bleak import BleakScanner, BleakClient
+from pymongo import MongoClient
+
+# URL to connect to MongoDB cluster
+MONGODB_URL = "mongodb+srv://n11547227_db_user:IAB330@iab330.ujghyul.mongodb.net/?appName=IAB330"
 
 # Match part of the advertised local name
 TARGET_NAME_FRAGMENT_1 = "Nano33IoT_Group12_D"
@@ -50,6 +54,24 @@ az_arr = []
 gx_arr = []
 gy_arr = []
 gz_arr = []
+
+async def mongodb_connect():
+    client = MongoClient(uri)
+    db = client["HAR_boxing"]
+    collection = db["collected_data"]
+    return collection
+
+async def mongodb_insert(collection, axis_features):
+    mongo_data = axis_features
+    mongo_data['raw_ax'] = ax_arr
+    mongo_data['raw_ay'] = ay_arr
+    mongo_data['raw_az'] = az_arr
+    mongo_data['raw_gx'] = gx_arr
+    mongo_data['raw_gy'] = gy_arr
+    mongo_data['raw_zy'] = gz_arr
+
+    collection.insert_one(mongo_data)
+
 
 # Connects to arduino
 async def scan_and_connect():
