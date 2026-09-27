@@ -23,15 +23,25 @@ COLLECTION_PERIOD = 1000
 # Current window Id
 window_id = 0
 
-# Label Dict
-labels = {
-    "right_jab": 1,
-    "left_jab": 2,
-    "right_hook": 3,
-    "left_hook": 4,
-    "right_uppercut": 5,
-    "left_uppercut": 6,
-}
+# # Label Dict
+# labels = {
+#     "right_jab": 1,
+#     "left_jab": 2,
+#     "right_hook": 3,
+#     "left_hook": 4,
+#     "right_uppercut": 5,
+#     "left_uppercut": 6,
+# }
+
+# Labels array
+labels = [
+    "right_jab",
+    "left_jab",
+    "right_hook",
+    "left_hook",
+    "right_uppercut",
+    "left_uppercut",
+]
 
 # Axes arrays
 ax_arr = []
@@ -132,9 +142,12 @@ async def main():
             print("--- Arduino Nano 33 IoT Control Menu ---")
             print("1. Connect to a device")
             print("2. Record Right Jab")
-            print("3. Read Humidity")
-            print("4. Activate IMU and receive data")
-            print("5. Exit")
+            print("3. Record Left Jab")
+            print("4. Record Right Hook")
+            print("5. Record Left Hook")
+            print("6. Record Right Uppercut")
+            print("7. Record Left Uppercut")
+            print("8. Exit")
             selection = input("Enter selection: ")
             selection = int(selection)
 
@@ -149,34 +162,15 @@ async def main():
                     else:
                         print("Failed to connect.")
 
-            elif selection == 2:
+            elif selection == in range(2, 8):
                     if (client == None or not client.is_connected):
                         print("Error! No device connected")
                         continue
                     try:
-                        await read_temp(client, labels["right_jab"])
+                        await read_temp(client, labels[selection])
                     except Exception as e:
                         print("Error during read:", e)
-
-            elif selection == 3:
-                if (client == None or not client.is_connected):
-                    print("Error! No device connected")
-                    continue
-                try:
-                    await read_humidity(client)
-                except Exception as e:
-                    print("Error during read:", e)
-
-            elif selection == 4:
-                if (client == None or not client.is_connected):
-                    print("Error! No device connected")
-                    continue
-                try:
-                    await read_IMU(client)
-                except Exception as e:
-                    print("Error during read:", e)
-
-            elif selection == 5:
+            elif selection == 8:
                 print("Exiting program")
                 if client and client.is_connected:
                     await client.disconnect()
