@@ -2,17 +2,18 @@
 #include <Arduino_LSM6DS3.h>  // IMU sensor
 
 
-/************* Aggrigation **********************/
-
-// Define the number of samples to keep in the sliding window
-const int WINDOW_SIZE = 30;
+/************* Sampling and Scaling **********************/
 
 unsigned long IMU_last_read_time = 0;
-const unsigned long IMU_READ_INTERVAL = 100;  // Interval between IMU messages (ms)
+const unsigned long IMU_READ_INTERVAL = 20;  // Interval between IMU messages (ms)
+
+const float ACC_SCALE = 1000.0f;              // g   -> milli-g   (must match Python SCALES)
+const float GYRO_SCALE = 8.0f;                // dps -> 1/8 dps   (must match Python SCALES)
 
 /****************** Message data struct ********************/
 
 struct IMU_3D {
+  uint32_t t_ms;
   int16_t ax;
   int16_t ay;
   int16_t az;
@@ -23,10 +24,21 @@ struct IMU_3D {
 
 /************* BLE **********************/
 
+const char* DEVICE_NAME = "Nano33IoT_Group12_Left";
+
 // BLE service and characteristic UUIDs
 BLEService imuService("19B10000-E8F2-537E-4F6C-D104768A1214");
 BLECharacteristic CommandChar("19B10003-E8F2-537E-4F6C-D104768A1214", BLERead | BLEWrite, 1);
 BLECharacteristic AccelChar("19B10004-E8F2-537E-4F6C-D104768A1214", BLERead | BLENotify, sizeof(IMU_3D));
+
+/*************** Utils ***********/
+int16_t convertToFixed(float val, float scale)
+{
+  float s = val * scale;
+  if (s > 32767.0f) s = 32767.0f;    // clip rather than overflow
+  if (s < -32768.0f) s = -32768.0f;
+  return (int16_t)lroundf(s);
+}
 
 /******************* Setup *********************/
 void setup() {
@@ -48,7 +60,7 @@ void setup() {
       ;
   }
 
-  BLE.setLocalName("Nano33IoT_Group12_D");
+  BLE.setLocalName(DEVICE_NAME);
   BLE.setAdvertisedService(imuService);
   imuService.addCharacteristic(CommandChar);
   imuService.addCharacteristic(AccelChar);
@@ -88,22 +100,23 @@ void loop() {
           IMU.readAcceleration(ax, ay, az);
           IMU.readGyroscope(gx, gy, gz);
 
-          Serial.println(ax);
-          Serial.println(ay);
-          Serial.println(az);
-          Serial.println(gx);
-          Serial.println(gy);
-          Serial.println(gz);
+          // Serial.println(ax);
+          // Serial.println(ay);
+          // Serial.println(az);
+          // Serial.println(gx);
+          // Serial.println(gy);
+          // Serial.println(gz);
 
-          Serial.println();  // Extra line between blocks for readability
+          // Serial.println();  // Extra line between blocks for readability
 
           IMU_3D IMUData = {
-            convertToFixed(ax),
-            convertToFixed(ay),
-            convertToFixed(az),
-            convertToFixed(gx),
-            convertToFixed(gy),
-            convertToFixed(gz)
+            millis(),
+            convertToFixed(ax, ACC_SCALE),
+            convertToFixed(ay, ACC_SCALE),
+            convertToFixed(az, ACC_SCALE),
+            convertToFixed(gx, GYRO_SCALE),
+            convertToFixed(gy, GYRO_SCALE),
+            convertToFixed(gz, GYRO_SCALE)
           };
 
           // Send via BLE
@@ -114,15 +127,8 @@ void loop() {
         }
       }
     }
-
-    delay(100);  // 10 Hz
   }
 
   Serial.print("Disconnected from central: ");
   Serial.println(central.address());
-}
-
-int16_t convertToFixed(float val)
-{
-  return round(val * 8.0f);
 }
