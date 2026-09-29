@@ -82,7 +82,7 @@ Consequences to design for:
   - If we collect orthodox only, that's a scope limitation to state.
   - Supporting southpaw means either recording southpaw sessions, or mirroring, which is imperfect because the hips and footwork differ too.
 
-### 2.3 Clock sync and missing samples
+### 2.3 Clock sync and missing samples (**QUESTIONABLE**)
 
 This is simpler than it sounds if we stop trying to sync hardware clocks and instead **make the data self-describing.**
 
