@@ -42,7 +42,7 @@ CHANNELS = ["ax", "ay", "az", "gx", "gy", "gz"]
 # Result units: accel in g, gyro in deg/s.
 SCALES = {"ax": 1000.0, "ay": 1000.0, "az": 1000.0,
           "gx": 8.0, "gy": 8.0, "gz": 8.0}
-NOMINAL_HZ = 50  # must match SAMPLE_INTERVAL_MS in the firmware (20 ms)
+NOMINAL_HZ = 100  # must match SAMPLE_INTERVAL_MS in the firmware (10 ms)
 
 IMU_PACKET = struct.Struct("<I6h")      # 16 bytes: t_ms, ax, ay, az, gx, gy, gz
 
@@ -171,10 +171,10 @@ async def run_trial(devices, label, meta_data, trial_index):
     t0_epoch = time.time()
     print("  START (rest)")
 
-    for label, start, end in timeline:
+    for stage_label, start, end in timeline:
         await sleep_until(t0 + start)
-        if label != "rest":
-            print(f"  >>> {label.upper()} <<<\a")
+        if stage_label != "rest":
+            print(f"  >>> {stage_label.upper()} <<<\a")
         elif start > 0:
             print("  rest")
         await sleep_until(t0 + end)

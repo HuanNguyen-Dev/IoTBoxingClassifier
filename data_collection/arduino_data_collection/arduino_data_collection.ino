@@ -5,7 +5,7 @@
 /************* Sampling and Scaling **********************/
 
 unsigned long IMU_last_read_time = 0;
-const unsigned long IMU_READ_INTERVAL = 20;  // Interval between IMU messages (ms)
+const unsigned long IMU_READ_INTERVAL = 10;  // Interval between IMU messages (ms)
 
 const float ACC_SCALE = 1000.0f;              // g   -> milli-g   (must match Python SCALES)
 const float GYRO_SCALE = 8.0f;                // dps -> 1/8 dps   (must match Python SCALES)
