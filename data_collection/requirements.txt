@@ -1,0 +1,5 @@
+bleak
+pymongo
+numpy
+pandas
+scikit-learn==1.9.0

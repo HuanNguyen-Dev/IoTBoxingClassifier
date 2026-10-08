@@ -247,6 +247,10 @@ async def main():
                 print(f"{n}. Record {label}")
                 options[str(n)] = label
                 n += 1
+            print(f"{n}. Real-time inference (one-second windows)")
+            inference_choice = str(n)
+            print(f"{n + 1}. Calibrate participant for real-time inference")
+            calibration_choice = str(n + 1)
             print("0. Exit")
 
             choice = await ask("Enter selection: ")
@@ -257,6 +261,30 @@ async def main():
             elif choice == "2":
                 meta_data["participant"] = (await ask("Participant ID: ")) or meta_data["participant"]
                 meta_data["session"] = (await ask("Session ID: ")) or meta_data["session"]
+
+            elif choice == inference_choice:
+                try:
+                    from realtime_inference import calibration_path, load_normalisation, run_inference
+                    default_path = calibration_path(meta_data["participant"])
+                    if default_path.exists():
+                        print(f"Using saved calibration for {meta_data['participant']}.")
+                        stats_path = default_path
+                    else:
+                        print(f"No saved calibration for {meta_data['participant']}; use option {calibration_choice} first.")
+                        stats_path = (await ask("Or enter an existing normalisation JSON path (Enter to cancel): ")).strip('"')
+                        if not stats_path:
+                            continue
+                    mean, std = load_normalisation(stats_path)
+                    await run_inference(devices, mean, std)
+                except Exception as e:
+                    print("Inference error:", e)
+
+            elif choice == calibration_choice:
+                try:
+                    from realtime_inference import run_calibration
+                    await run_calibration(devices, meta_data.copy(), run_trial)
+                except Exception as e:
+                    print("Calibration error:", e)
 
             elif choice in options:
                 connected = [device for device in devices if device.client.is_connected]
