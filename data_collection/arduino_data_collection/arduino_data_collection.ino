@@ -1,11 +1,11 @@
 #include <ArduinoBLE.h>       // BLE
-#include <Arduino_LSM6DS3.h>  // IMU sensor
+#include <SparkFunLSM6DS3.h>  // IMU sensor
 
+LSM6DS3 IMU(I2C_MODE, 0x6A);
 
 /************* Sampling and Scaling **********************/
 
-unsigned long IMU_last_read_time = 0;
-const unsigned long IMU_READ_INTERVAL = 10;  // Interval between IMU messages (ms)
+const uint16_t IMU_SAMPLE_RATE = 208;  // Sensor output rate; must match Python NOMINAL_HZ
 
 const float ACC_SCALE = 1000.0f;              // g   -> milli-g   (must match Python SCALES)
 const float GYRO_SCALE = 8.0f;                // dps -> 1/8 dps   (must match Python SCALES)
@@ -46,8 +46,18 @@ void setup() {
 
   /*************** Initialise IMU *****************/
 
-  if (!IMU.begin()) {
-    Serial.println("Failed to initialize IMU!");
+  IMU.settings.accelEnabled = 1;
+  IMU.settings.gyroEnabled = 1;
+  IMU.settings.accelSampleRate = IMU_SAMPLE_RATE;
+  IMU.settings.gyroSampleRate = IMU_SAMPLE_RATE;
+  IMU.settings.accelRange = 4;
+  IMU.settings.gyroRange = 2000;
+  IMU.settings.accelODROff = 0;
+  IMU.settings.accelFifoEnabled = 0;
+  IMU.settings.gyroFifoEnabled = 0;
+
+  if (IMU.begin() != IMU_SUCCESS) {
+    Serial.println("Failed to initialize SparkFun LSM6DS3! Check sensor ID/address.");
     while (1)
       ;
   }
@@ -71,6 +81,7 @@ void setup() {
   CommandChar.setValue(&command, 1);
   AccelChar.setValue("");
 
+  BLE.setConnectionInterval(6, 12);  // Request 7.5–15 ms; central negotiates actual interval
   BLE.advertise();
   Serial.println("BLE advertising with sensor notify characteristic started...");
 }
@@ -93,38 +104,42 @@ void loop() {
       }
 
       if (IMU_active) {
-        float ax, ay, az;
-        float gx, gy, gz;
-        if (IMU.accelerationAvailable() && IMU.gyroscopeAvailable() && millis() - IMU_last_read_time >= IMU_READ_INTERVAL) {
-          IMU_last_read_time = millis();
-          IMU.readAcceleration(ax, ay, az);
-          IMU.readGyroscope(gx, gy, gz);
-
-          // Serial.println(ax);
-          // Serial.println(ay);
-          // Serial.println(az);
-          // Serial.println(gx);
-          // Serial.println(gy);
-          // Serial.println(gz);
-
-          // Serial.println();  // Extra line between blocks for readability
-
-          IMU_3D IMUData = {
-            millis(),
-            convertToFixed(ax, ACC_SCALE),
-            convertToFixed(ay, ACC_SCALE),
-            convertToFixed(az, ACC_SCALE),
-            convertToFixed(gx, GYRO_SCALE),
-            convertToFixed(gy, GYRO_SCALE),
-            convertToFixed(gz, GYRO_SCALE)
-          };
-
-          // Send via BLE
-          int result = AccelChar.writeValue(
-            (uint8_t*)&IMUData,
-            sizeof(IMUData)
-          );
+        uint8_t status = 0;
+        if (IMU.readRegister(&status, LSM6DS3_ACC_GYRO_STATUS_REG) != IMU_SUCCESS) {
+          continue;
         }
+        // Require fresh acceleration and gyroscope data before sending a sample.
+        if ((status & 0x03) != 0x03) {
+          continue;
+        }
+
+        uint16_t errors_before = IMU.nonSuccessCounter;
+        uint16_t warnings_before = IMU.allOnesCounter;
+        float ax = IMU.readFloatAccelX();
+        float ay = IMU.readFloatAccelY();
+        float az = IMU.readFloatAccelZ();
+        float gx = IMU.readFloatGyroX();
+        float gy = IMU.readFloatGyroY();
+        float gz = IMU.readFloatGyroZ();
+        if (IMU.nonSuccessCounter != errors_before || IMU.allOnesCounter != warnings_before) {
+          continue;
+        }
+
+        IMU_3D IMUData = {
+          millis(),
+          convertToFixed(ax, ACC_SCALE),
+          convertToFixed(ay, ACC_SCALE),
+          convertToFixed(az, ACC_SCALE),
+          convertToFixed(gx, GYRO_SCALE),
+          convertToFixed(gy, GYRO_SCALE),
+          convertToFixed(gz, GYRO_SCALE)
+        };
+
+        // Send the existing 16-byte packet via BLE.
+        int result = AccelChar.writeValue(
+          (uint8_t*)&IMUData,
+          sizeof(IMUData)
+        );
       }
     }
   }

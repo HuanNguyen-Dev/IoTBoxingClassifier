@@ -42,7 +42,7 @@ CHANNELS = ["ax", "ay", "az", "gx", "gy", "gz"]
 # Result units: accel in g, gyro in deg/s.
 SCALES = {"ax": 1000.0, "ay": 1000.0, "az": 1000.0,
           "gx": 8.0, "gy": 8.0, "gz": 8.0}
-NOMINAL_HZ = 100  # must match SAMPLE_INTERVAL_MS in the firmware (10 ms)
+NOMINAL_HZ = 208  # must match IMU_SAMPLE_RATE in the firmware; received rate is measured separately
 
 IMU_PACKET = struct.Struct("<I6h")      # 16 bytes: t_ms, ax, ay, az, gx, gy, gz
 
