@@ -1,11 +1,54 @@
 #include <ArduinoBLE.h>       // BLE
-#include <SparkFunLSM6DS3.h>  // IMU sensor
-
-LSM6DS3 IMU(I2C_MODE, 0x6A);
+#include <Arduino_LSM6DS3.h>  // Supports sensor IDs 0x69 and 0x6C
 
 /************* Sampling and Scaling **********************/
 
 const uint16_t IMU_SAMPLE_RATE = 208;  // Sensor output rate; must match Python NOMINAL_HZ
+
+// Use the Arduino driver's protected register API to configure and verify 208 Hz.
+// Its default begin() configures 104 Hz, and its default rate getters are hardcoded.
+#undef IMU
+class BoxingIMU : public LSM6DS3Class {
+public:
+  BoxingIMU() : LSM6DS3Class(Wire, 0x6A), sensor_id(-1) {}
+
+  int begin() {
+    Wire.begin();
+    sensor_id = readRegister(LSM6DS3_WHO_AM_I_REG);
+    if (!LSM6DS3Class::begin()) return 0;
+
+    int accel = readRegister(LSM6DS3_CTRL1_XL);
+    int gyro = readRegister(LSM6DS3_CTRL2_G);
+    int control = readRegister(0x12);  // CTRL3_C
+    if (accel < 0 || gyro < 0 || control < 0) return 0;
+
+    // ODR nibble 0x5 = 208 Hz; preserve full-scale and filter bits.
+    uint8_t accel_208 = (accel & 0x0F) | 0x50;
+    uint8_t gyro_208 = (gyro & 0x0F) | 0x50;
+    uint8_t control_bdu = control | 0x44;  // Block Data Update + register auto-increment
+    if (writeRegister(LSM6DS3_CTRL1_XL, accel_208) != 1 ||
+        writeRegister(LSM6DS3_CTRL2_G, gyro_208) != 1 ||
+        writeRegister(0x12, control_bdu) != 1) return 0;
+
+    return readRegister(LSM6DS3_CTRL1_XL) == accel_208 &&
+           readRegister(LSM6DS3_CTRL2_G) == gyro_208 &&
+           readRegister(0x12) == control_bdu;
+  }
+
+  int sensorId() const { return sensor_id; }
+  float accelerationSampleRate() override { return IMU_SAMPLE_RATE; }
+  float gyroscopeSampleRate() override { return IMU_SAMPLE_RATE; }
+
+  bool sampleReady() {
+    int status = readRegister(LSM6DS3_STATUS_REG);
+    return status >= 0 && (status & 0x03) == 0x03;
+  }
+
+private:
+  int sensor_id;
+};
+
+BoxingIMU IMU;
 
 const float ACC_SCALE = 1000.0f;              // g   -> milli-g   (must match Python SCALES)
 const float GYRO_SCALE = 8.0f;                // dps -> 1/8 dps   (must match Python SCALES)
@@ -43,31 +86,38 @@ int16_t convertToFixed(float val, float scale)
 /******************* Setup *********************/
 void setup() {
   Serial.begin(9600);
+  // Allow the USB Serial Monitor to attach without blocking standalone startup.
+  unsigned long serial_start = millis();
+  while (!Serial && millis() - serial_start < 3000) {
+    delay(10);
+  }
+  Serial.print("Starting ");
+  Serial.println(DEVICE_NAME);
 
   /*************** Initialise IMU *****************/
 
-  IMU.settings.accelEnabled = 1;
-  IMU.settings.gyroEnabled = 1;
-  IMU.settings.accelSampleRate = IMU_SAMPLE_RATE;
-  IMU.settings.gyroSampleRate = IMU_SAMPLE_RATE;
-  IMU.settings.accelRange = 4;
-  IMU.settings.gyroRange = 2000;
-  IMU.settings.accelODROff = 0;
-  IMU.settings.accelFifoEnabled = 0;
-  IMU.settings.gyroFifoEnabled = 0;
-
-  if (IMU.begin() != IMU_SUCCESS) {
-    Serial.println("Failed to initialize SparkFun LSM6DS3! Check sensor ID/address.");
-    while (1)
-      ;
+  Serial.println("Initializing IMU at 208 Hz...");
+  if (!IMU.begin()) {
+    // Repeat the error so it remains visible if the monitor opens after startup.
+    while (1) {
+      Serial.print("IMU initialization/208 Hz configuration failed. WHO_AM_I=");
+      Serial.println(IMU.sensorId(), HEX);
+      Serial.println("BLE has not started. Check Arduino_LSM6DS3 supports IDs 0x69 and 0x6C.");
+      delay(1000);
+    }
   }
+  Serial.print("IMU initialized. WHO_AM_I=0x");
+  Serial.println(IMU.sensorId(), HEX);
+  Serial.println("208 Hz configuration verified by register readback.");
 
   /**************** Initialise BLE *****************/
 
+  Serial.println("Initializing BLE...");
   if (!BLE.begin()) {
-    Serial.println("Starting BLE failed!");
-    while (1)
-      ;
+    while (1) {
+      Serial.println("Starting BLE failed!");
+      delay(1000);
+    }
   }
 
   BLE.setLocalName(DEVICE_NAME);
@@ -104,24 +154,14 @@ void loop() {
       }
 
       if (IMU_active) {
-        uint8_t status = 0;
-        if (IMU.readRegister(&status, LSM6DS3_ACC_GYRO_STATUS_REG) != IMU_SUCCESS) {
-          continue;
-        }
         // Require fresh acceleration and gyroscope data before sending a sample.
-        if ((status & 0x03) != 0x03) {
+        if (!IMU.sampleReady()) {
           continue;
         }
 
-        uint16_t errors_before = IMU.nonSuccessCounter;
-        uint16_t warnings_before = IMU.allOnesCounter;
-        float ax = IMU.readFloatAccelX();
-        float ay = IMU.readFloatAccelY();
-        float az = IMU.readFloatAccelZ();
-        float gx = IMU.readFloatGyroX();
-        float gy = IMU.readFloatGyroY();
-        float gz = IMU.readFloatGyroZ();
-        if (IMU.nonSuccessCounter != errors_before || IMU.allOnesCounter != warnings_before) {
+        float ax, ay, az;
+        float gx, gy, gz;
+        if (!IMU.readAcceleration(ax, ay, az) || !IMU.readGyroscope(gx, gy, gz)) {
           continue;
         }
 
