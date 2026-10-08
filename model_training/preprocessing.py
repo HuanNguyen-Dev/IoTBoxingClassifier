@@ -8,7 +8,15 @@ SUFFIXES = ["_l", "_r"]
 SAMPLING_PERIOD = 0.01
 FEATURES = ["mean", "std", "min", "max", "range", "median", "rms"]
 FEATURE_COLUMNS = [f"{c}{s}_{f}" for s in SUFFIXES for c in CHANNELS for f in FEATURES]
-
+HAND_NAMES = {"_l": "Left", "_r": "Right"}
+HAND_FEATURE_COLUMNS = {
+    suffix: [f"{channel}{suffix}_{feature}" for channel in CHANNELS for feature in FEATURES]
+    for suffix in SUFFIXES
+}
+HAND_LABELS = {
+    "_l": ["left_jab", "left_hook", "left_uppercut", "rest"],
+    "_r": ["right_jab", "right_hook", "right_uppercut", "rest"],
+}
 
 # Copied from notebook cell 9.
 def IIR_filter(value, prev, alpha):

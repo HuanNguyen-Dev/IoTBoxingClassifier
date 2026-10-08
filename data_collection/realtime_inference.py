@@ -11,10 +11,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from model_training.preprocessing import CHANNELS, SUFFIXES, FEATURE_COLUMNS, feature_frame, normalise
+
+from model_training.preprocessing import (
+    CHANNELS, SUFFIXES, FEATURE_COLUMNS, feature_frame, normalise,
+    HAND_NAMES, HAND_FEATURE_COLUMNS, HAND_LABELS,
+)
+LEFT_MODEL_PATH = (
+    Path(__file__).resolve().parents[1] / "model_training" / "deployment_model_l.pkl"
+)
+RIGHT_MODEL_PATH = (
+    Path(__file__).resolve().parents[1] / "model_training" / "deployment_model_r.pkl"
+)
+
 # LabelEncoder sorts the training labels alphabetically.
 LABELS = sorted(["left_jab", "right_jab", "left_hook", "right_hook",
                  "left_uppercut", "right_uppercut", "rest"])
-MODEL_PATH = Path(__file__).resolve().parents[1] / "model_training" / "deployment_model.pkl"
+# MODEL_PATH = Path(__file__).resolve().parents[1] / "model_training" / "deployment_model.pkl"
 # Observed collection rate is 75–85 Hz; allow some missing samples.
 MIN_SAMPLES_PER_SECOND = 70
 
@@ -59,9 +71,9 @@ async def run_calibration(devices, meta_data, run_trial):
                 if not device.client.is_connected:
                     raise RuntimeError(f"{device.name} disconnected; calibration was not saved.")
                 data = doc["devices"][device.name]
-                times = np.asarray(data["t_dev_ms"])
-                start = np.searchsorted(times, segment["start"] * 1000, side="left")
-                end = np.searchsorted(times, segment["end"] * 1000, side="left")
+                times = np.asarray(data["t"])
+                start = np.searchsorted(times, segment["start"], side="left")
+                end = np.searchsorted(times, segment["end"], side="left")
                 duration = segment["end"] - segment["start"]
                 if end - start < MIN_SAMPLES_PER_SECOND * duration:
                     raise ValueError(f"Too few samples from {device.name}; repeat calibration.")
@@ -97,14 +109,23 @@ def load_normalisation(path):
     return mean, std
 
 
-async def run_inference(devices, mean, std, model_path=MODEL_PATH):
+async def run_inference(devices, mean, std, left_model_path=LEFT_MODEL_PATH, right_model_path=RIGHT_MODEL_PATH,):
     import numpy as np
 
     hands = connected_hands(devices)
-    with open(model_path, "rb") as source:
-        model = pickle.load(source)
-    if list(getattr(model, "feature_names_in_", [])) != FEATURE_COLUMNS:
-        raise ValueError("The model's feature names/order do not match the training notebook.")
+    with open(left_model_path, "rb") as source:
+        left_model = pickle.load(source)
+    with open(right_model_path, "rb") as source:
+        right_model = pickle.load(source)
+
+    if list(getattr(left_model, "feature_names_in_", [])) != HAND_FEATURE_COLUMNS["_l"]:
+        raise ValueError("Left model has incorrect feature names/order.")
+    if set(getattr(left_model, "classes_", [])) != set(HAND_LABELS["_l"]):
+        raise ValueError("Left model has incorrect string classes.")
+    if list(getattr(right_model, "feature_names_in_", [])) != HAND_FEATURE_COLUMNS["_r"]:
+        raise ValueError("Right model has incorrect feature names/order.")
+    if set(getattr(right_model, "classes_", [])) != set(HAND_LABELS["_r"]):
+        raise ValueError("Right model has incorrect string classes.")
 
     started = []
     try:
@@ -139,10 +160,28 @@ async def run_inference(devices, mean, std, model_path=MODEL_PATH):
                     print(f"[{stamp}] Skipped: insufficient samples (Left={counts[0]}, Right={counts[1]}).")
                 else:
                     frame = normalise(feature_frame(windows), mean, std)
-                    prediction = model.predict(frame)[0]
-                    label = LABELS[int(prediction)] if isinstance(prediction, (int, np.integer)) else str(prediction)
-                    confidence = float(model.predict_proba(frame).max())
-                    print(f"[{stamp}] {label} ({confidence:.0%}) | Left={counts[0]}, Right={counts[1]} samples")
+                    if not np.isfinite(frame.to_numpy(dtype=float)).all():
+                        raise ValueError("Live features contain NaN or infinity.")
+                    outputs = []
+                    for suffix in SUFFIXES:
+                        if suffix == "_l":
+                            model = left_model
+                            columns = HAND_FEATURE_COLUMNS["_l"]
+                            hand_name = "Left"
+                        elif suffix == "_r":
+                            model = right_model
+                            columns = HAND_FEATURE_COLUMNS["_r"]
+                            hand_name = "Right"
+                        else:
+                            raise ValueError(f"Unknown hand: {suffix}")
+
+                        hand_frame = frame[columns]
+                        label = str(model.predict(hand_frame)[0])
+                        probabilities = model.predict_proba(hand_frame)[0]
+                        class_index = list(model.classes_).index(label)
+                        confidence = float(probabilities[class_index])
+                        outputs.append(f"{hand_name}={label} ({confidence:.0%})")
+                    print(f"[{stamp}] {' | '.join(outputs)} | Left={counts[0]}, Right={counts[1]} samples")
                 deadline += 1.0
         except Exception as error:
             print("Inference error:", error)
