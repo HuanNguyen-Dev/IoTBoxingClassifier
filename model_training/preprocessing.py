@@ -4,10 +4,12 @@ import numpy as np
 import pandas as pd
 
 CHANNELS = ["ax", "ay", "az", "gx", "gy", "gz"]
+
 SUFFIXES = ["_l", "_r"]
 SAMPLING_PERIOD = 0.01
 FEATURES = ["mean", "std", "min", "max", "range", "median", "rms"]
 FEATURE_COLUMNS = [f"{c}{s}_{f}" for s in SUFFIXES for c in CHANNELS for f in FEATURES]
+
 HAND_NAMES = {"_l": "Left", "_r": "Right"}
 HAND_FEATURE_COLUMNS = {
     suffix: [f"{channel}{suffix}_{feature}" for channel in CHANNELS for feature in FEATURES]
