@@ -2,6 +2,8 @@
 
 import numpy as np
 import pandas as pd
+from itertools import combinations
+from scipy.stats import skew, kurtosis
 
 CHANNELS = ["ax", "ay", "az", "gx", "gy", "gz"]
 
@@ -34,28 +36,70 @@ def filter_signal(signal):
         prev = record
     return data
 
+FS = 100 # sampling rate in Hz, set to your actual rate
 
-# Copied from notebook cell 12.
-def extract_features(signal):
-    signal = np.asarray(signal)
-    if len(signal) == 0:
-        return {
-            'mean': np.nan,
-            'std': np.nan,
-            'min': np.nan,
-            'max': np.nan,
-            'range': np.nan,
-            'median': np.nan,
-            'rms': np.nan,
-        }
+def freq_features(signal, fs=FS, n_fft=256):
+    signal = np.asarray(signal, dtype=float)
+    if len(signal) < 4:
+        return {'dom_freq': np.nan, 'dom_amp': np.nan, 'abs_diff': np.nan}
+
+    # Remove DC offset so gravity/orientation doesn't dominate the spectrum
+    x = signal - signal.mean()
+
+    # Hann window reduces spectral leakage from the window edges
+    x = x * np.hanning(len(x))
+
+    # Zero-padding gives finer frequency spacing (1 Hz -> ~0.2 Hz at 50 Hz, n_fft=256)
+    spectrum = np.abs(np.fft.rfft(x, n=n_fft)) / len(x)
+    freqs = np.fft.rfftfreq(n_fft, d=1/fs)
+
+    # Skip bin 0 (DC)
+    idx = np.argmax(spectrum[1:]) + 1
+
     return {
-        'mean': np.mean(signal),
-        'std': np.std(signal),
-        'min': np.min(signal),
-        'max': np.max(signal),
-        'range': np.max(signal) - np.min(signal),
+        'dom_freq': freqs[idx], # frequency
+        'dom_amp': spectrum[idx],  # frequency amplitude
+    }
+
+def safe_corr(a, b, eps=1e-9):
+    # Pearson correlation that returns 0 instead of NaN when a channel is flat
+    a = a - a.mean()
+    b = b - b.mean()
+    denom = np.sqrt(np.sum(a**2) * np.sum(b**2))
+    if denom < eps:
+        return 0.0
+    return float(np.sum(a * b) / denom)
+
+def correlation_features(win, channels=CHANNELS, prefix=''):
+    # win: (n_samples, n_channels), columns in the same order as `channels`
+    feats = {}
+    for i, j in combinations(range(len(channels)), 2):
+        feats[f'{prefix}corr_{channels[i]}_{channels[j]}'] = safe_corr(win[:, i], win[:, j])
+    return feats
+
+def extract_features(signal):
+    signal = np.asarray(signal, dtype=float)
+    n = len(signal)
+    keys = ['mean','std','min','max','range','median','rms','energy',
+            'argmax_pos','argmin_pos','skew','kurtosis','dom_freq','dom_amp']
+    if n < 4:
+        return {k: np.nan for k in keys}
+
+    flat = signal.std() < 1e-9   # skew/kurtosis are undefined for a constant signal
+    return {
+        'mean': signal.mean(),
+        'std': signal.std(),
+        'min': signal.min(),
+        'max': signal.max(),
+        'range': np.ptp(signal),
         'median': np.median(signal),
-        'rms': np.sqrt(np.mean(signal ** 2)),
+        'rms': np.sqrt(np.mean(signal**2)),
+        'energy': np.sum(signal**2),
+        'argmax_pos': np.argmax(signal) / n,
+        'argmin_pos': np.argmin(signal) / n,
+        'skew': 0.0 if flat else skew(signal),
+        'kurtosis': 0.0 if flat else kurtosis(signal),
+        **freq_features(signal),
     }
 
 
