@@ -10,14 +10,19 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from model_training.preprocessing import CHANNELS, SUFFIXES, FEATURE_COLUMNS, feature_frame, normalise
+from model_training.preprocessing import (
+    CHANNELS, SUFFIXES, FEATURE_COLUMNS, WIN, WIN_S,
+    combine_devices, latest_window_frame, make_windows, normalise)
 # LabelEncoder sorts the training labels alphabetically.
 LABELS = sorted(["left_jab", "right_jab", "left_hook", "right_hook",
                  "left_uppercut", "right_uppercut", "rest"])
 MODEL_PATH = Path(__file__).resolve().parents[1] / "model_training" / "deployment_model.pkl"
 # Observed collection rate is 75–85 Hz; allow some missing samples.
 MIN_SAMPLES_PER_SECOND = 70
-
+MIN_WINDOW_SAMPLES = int(MIN_SAMPLES_PER_SECOND * WIN_S)   # raw samples expected in 0.75 s
+BUFFER_S = 2.0        # history kept per hand
+WARMUP_S = 1.5        # don't predict until the buffer is this long (filter start-up ramp)
+PREDICT_EVERY_S = 1.0
 
 def calibration_path(participant):
     identifier = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', participant).strip(' .')
@@ -42,7 +47,7 @@ async def run_calibration(devices, meta_data, run_trial):
     import pandas as pd
 
     hands = connected_hands(devices)
-    frames = []
+    windows = []
     punches = [label for label in LABELS if label != "rest"]
     print("Calibration: rest, then three trials of each punch (about 2.5 minutes).")
     print("Follow the countdown and punch once when prompted; rest between punches.")
@@ -53,21 +58,23 @@ async def run_calibration(devices, meta_data, run_trial):
             doc = await run_trial(list(hands.values()), label, meta_data, index)
         finally:
             await asyncio.gather(*(d.stop_stream() for d in hands.values()), return_exceptions=True)
-        for segment in doc["label_timeline"]:
-            windows = {}
-            for suffix, device in hands.items():
-                if not device.client.is_connected:
-                    raise RuntimeError(f"{device.name} disconnected; calibration was not saved.")
-                data = doc["devices"][device.name]
-                times = np.asarray(data["t_dev_ms"])
-                start = np.searchsorted(times, segment["start"] * 1000, side="left")
-                end = np.searchsorted(times, segment["end"] * 1000, side="left")
-                duration = segment["end"] - segment["start"]
-                if end - start < MIN_SAMPLES_PER_SECOND * duration:
-                    raise ValueError(f"Too few samples from {device.name}; repeat calibration.")
-                windows[suffix] = {c: data[c][start:end] for c in CHANNELS}
-            frames.append(feature_frame(windows))
-    features = pd.concat(frames, ignore_index=True)
+        
+        for device in hands.values():
+            if not device.client.is_connected:
+                raise RuntimeError(f"{device.name} disconnected; calibration was not saved.")
+        span = max(seg["end"] for seg in doc["label_timeline"])
+        
+        for device in hands.values():
+            if len(doc["devices"][device.name]["t_dev_ms"]) < MIN_SAMPLES_PER_SECOND * span:
+                raise ValueError(f"Too few samples from {device.name}; repeat calibration.")
+        row = {"participant": meta_data["participant"],
+               "label_timeline": doc["label_timeline"],
+               **combine_devices({d.name: doc["devices"][d.name] for d in hands.values()})}
+        windows.extend(make_windows(row, index))
+        
+    if not windows:
+        raise ValueError("Calibration produced no windows; repeat calibration.")
+    features = pd.DataFrame(windows)[FEATURE_COLUMNS]
     mean, std = features.mean(), features.std(ddof=1)
     if not np.isfinite(mean).all() or not np.isfinite(std).all():
         raise ValueError("Calibration produced invalid features; previous calibration was kept.")
@@ -83,17 +90,15 @@ async def run_calibration(devices, meta_data, run_trial):
     return path
 
 
-def load_normalisation(path):
-    """JSON mapping feature names to participant mean and sample std."""
-    import numpy as np
-    import pandas as pd
-
+def load_normalisation(path, columns):
     with open(path, encoding="utf-8") as source:
         stats = json.load(source)
-    mean = pd.Series(stats["mean"]).reindex(FEATURE_COLUMNS)
-    std = pd.Series(stats["std"]).reindex(FEATURE_COLUMNS)
+    mean = pd.Series(stats["mean"]).reindex(columns)
+    std = pd.Series(stats["std"]).reindex(columns)
     if not np.isfinite(mean).all() or not np.isfinite(std).all() or (std < 0).any():
-        raise ValueError("Normalisation needs a finite mean and nonnegative std for all 84 features.")
+        raise ValueError(
+            f"Calibration file is missing/invalid for the model's {len(columns)} features. "
+            "Re-run calibration with the current preprocessing.")
     return mean, std
 
 
@@ -135,15 +140,24 @@ async def run_inference(devices, mean, std, model_path=MODEL_PATH):
                     for channel in CHANNELS:
                         del device.data[channel][:end]
                 stamp = datetime.datetime.now().strftime("%H:%M:%S")
-                if min(counts) < MIN_SAMPLES_PER_SECOND:
+                snap, span, counts = snapshot(hands)
+                frame = None
+                if snap is None or span < WARMUP_S:
+                    print(f"[{stamp}] Warming up...")
+                elif min(counts) < MIN_WINDOW_SAMPLES:
                     print(f"[{stamp}] Skipped: insufficient samples (Left={counts[0]}, Right={counts[1]}).")
                 else:
-                    frame = normalise(feature_frame(windows), mean, std)
-                    prediction = model.predict(frame)[0]
-                    label = LABELS[int(prediction)] if isinstance(prediction, (int, np.integer)) else str(prediction)
-                    confidence = float(model.predict_proba(frame).max())
-                    print(f"[{stamp}] {label} ({confidence:.0%}) | Left={counts[0]}, Right={counts[1]} samples")
-                deadline += 1.0
+                    frame = latest_window_frame(combine_devices(snap))
+                if frame is not None:
+                    frame = normalise(frame[model_cols], mean, std)
+                    if not np.isfinite(frame.to_numpy()).all():
+                        print(f"[{stamp}] Skipped: non-finite features.")
+                    else:
+                        proba = model.predict_proba(frame)[0]
+                        prediction = model.classes_[proba.argmax()]
+                        label = LABELS[int(prediction)] if isinstance(prediction, (int, np.integer)) else str(prediction)
+                        print(f"[{stamp}] {label} ({proba.max():.0%}) | Left={counts[0]}, Right={counts[1]} samples")
+                deadline += PREDICT_EVERY_S
         except Exception as error:
             print("Inference error:", error)
         finally:
