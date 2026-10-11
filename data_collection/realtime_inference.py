@@ -22,7 +22,7 @@ from model_training.preprocessing import (
 LABELS = sorted(["left_jab", "right_jab", "left_hook", "right_hook",
                  "left_uppercut", "right_uppercut", "rest"])
 MODEL_PATH = Path(__file__).resolve().parents[1] / "model_training" / "deployment_model-w0.75-p0.8.pkl"
-MIN_SAMPLES_PER_SECOND = 70          # observed rate is 75-85 Hz
+MIN_SAMPLES_PER_SECOND = 60          # observed rate is 75-85 Hz
 CAL_STRIDE_S = 0.25                  # calibration window stride
 _ZI = lfilter_zi([ALPHA], [1, -(1 - ALPHA)])
 
