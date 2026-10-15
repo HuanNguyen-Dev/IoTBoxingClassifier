@@ -1,35 +1,34 @@
 """
 HAR boxing data collection: up to 4 Arduino Nano 33 IoT devices -> Raspberry Pi -> MongoDB.
 
-Each trial is a scripted timeline controlled by this program (not by human start/stop):
-    [countdown, not recorded] -> REST lead-in -> (PUNCH -> REST) x REPS -> END
-Raw, timestamped IMU samples from every device plus the label timeline are saved as ONE
-document per trial. No features are computed here; do windowing/filtering/features later.
-
-Setup:
-    pip install bleak pymongo
-    export MONGODB_URI="mongodb+srv://<user>:<password>@<cluster>/?appName=IAB330"
-
-Firmware: nano_imu_ble.ino (16-byte packets: uint32 t_ms + 6 x int16). Legacy 12-byte
-packets (6 x int16, no timestamp) are also accepted.
 """
 
 import asyncio
 import datetime
 import os
-import random
 import struct
 import time
+import json
 
+import numpy as np
+import pandas as pd
 from bleak import BleakClient, BleakScanner
 from pymongo import MongoClient
+from pathlib import Path
+from dotenv import load_dotenv
+
+from realtime_inference import calibration_path, run_inference, run_calibration, FEATURE_COLUMNS
 
 # ----------------------------- Configuration -----------------------------
-MONGODB_URI = "mongodb+srv://n11547227_db_user:IAB330@iab330.ujghyul.mongodb.net/?appName=IAB330" # os.environ.get("MONGODB_URI")  # do NOT hard-code credentials
+env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
+MONGODB_URI = os.environ.get("MONGODB_URI")
 DB_NAME = "HAR_boxing"
 COLLECTION_NAME = "collected_data"
 
-DEVICE_PREFIX = "Nano33IoT_Group12"  # matches ..._Left, ..._Right, and any extras
+# matches ..._Left, ..._Right, and any extras
+DEVICE_PREFIX = "Nano33IoT_Group12"  
 MAX_DEVICES = 4
 
 COMMAND_UUID = "19B10003-E8F2-537E-4F6C-D104768A1214"
@@ -38,21 +37,22 @@ START_CMD = b"\x01"
 STOP_CMD = b"\x00"
 
 CHANNELS = ["ax", "ay", "az", "gx", "gy", "gz"]
-# Fixed-point divisors. Must match ACC_SCALE / GYRO_SCALE in the firmware.
-# Result units: accel in g, gyro in deg/s.
+# Fixed-point divisors.
 SCALES = {"ax": 1000.0, "ay": 1000.0, "az": 1000.0,
           "gx": 8.0, "gy": 8.0, "gz": 8.0}
-NOMINAL_HZ = 100  # must match SAMPLE_INTERVAL_MS in the firmware (10 ms)
 
-IMU_PACKET = struct.Struct("<I6h")      # 16 bytes: t_ms, ax, ay, az, gx, gy, gz
+NOMINAL_HZ = 100
+
+# 16 bytes: t_ms, ax, ay, az, gx, gy, gz
+IMU_PACKET = struct.Struct("<I6h")      
 
 # Trial timing (seconds)
 COUNTDOWN_S = 3
 LEAD_IN_S = 1.0
 PUNCH_S = 1.0
 REST_S = 2.0
-REPS_PER_TRIAL = 1    # raise to 5-10 to record several punches per trial
-IDLE_TRIAL_S = 10.0   # length of a pure "rest" trial
+REPS_PER_TRIAL = 1
+IDLE_TRIAL_S = 10.0 
 
 PUNCHES = [
     "right_jab", "left_jab",
@@ -71,7 +71,7 @@ class Device:
 
     def reset(self):
         self.t = []       # Pi receive time (perf_counter, seconds)
-        self.t_dev = []   # device millis(), if firmware sends it
+        self.t_dev = []   # Arduino timestamp
         self.data = {c: [] for c in CHANNELS}
         self.bad_packets = 0
 
@@ -120,9 +120,7 @@ async def scan_and_connect(devices):
     device_names = [match.name for match in matches]
 
     candidates = [Device(match) for match in matches]
-    results = await asyncio.gather(
-        *(device.client.connect() for device in candidates), return_exceptions=True
-    )
+    results = await asyncio.gather(*(device.client.connect() for device in candidates), return_exceptions=True)
     for device, res in zip(candidates, results):
         if isinstance(res, Exception) or not device.client.is_connected:
             print(f"  FAILED  {device.name} ({device.address}): {res}")
@@ -134,20 +132,21 @@ async def scan_and_connect(devices):
 
 # --------------------------------- Timeline ---------------------------------
 def build_timeline(label):
-    """Return (list of (label, start_s, end_s), total_duration_s), relative to trial start."""
     if label == "rest":
         return [("rest", 0.0, IDLE_TRIAL_S)], IDLE_TRIAL_S
 
-    timeline, t = [("rest", 0.0, LEAD_IN_S)], LEAD_IN_S
+    timeline = [("rest", 0.0, LEAD_IN_S)]
+    current_t = LEAD_IN_S
     for _ in range(REPS_PER_TRIAL):
-        timeline.append((label, t, t + PUNCH_S))
-        t += PUNCH_S
+        timeline.append((label, current_t, current_t + PUNCH_S))
+        current_t += PUNCH_S
         rest = REST_S
-        timeline.append(("rest", t, t + rest))
-        t += rest
-    return timeline, t
+        timeline.append(("rest", current_t, current_t + rest))
+        current_t += rest
+    return timeline, current_t
 
 
+# --------------------------------- Delay -------------------------------------
 async def sleep_until(target_time):
     delay = target_time - time.perf_counter()
     if delay > 0:
@@ -165,6 +164,7 @@ async def run_trial(devices, label, meta_data, trial_index):
 
     for device in devices:
         device.reset()
+    # Collect Arduino data asynchronously 
     await asyncio.gather(*(device.start_stream() for device in devices))
 
     t0 = time.perf_counter()
@@ -180,8 +180,10 @@ async def run_trial(devices, label, meta_data, trial_index):
         await sleep_until(t0 + end)
 
     print("  END")
+    # Stop Arduino Connection
     await asyncio.gather(*(device.stop_stream() for device in devices), return_exceptions=True)
 
+    # MongoDB data
     doc = {
         **meta_data,
         "trial_index": trial_index,
@@ -210,9 +212,7 @@ async def run_trial(devices, label, meta_data, trial_index):
                 "bad_packets": device.bad_packets,
                 "t_dev_ms": [current_t_dev - start_t_dev for current_t_dev in device.t_dev]
             }
-        note = ""
-        if device.bad_packets:
-            note += f", {device} bad packets"
+
         print(f"    {device.name}: {n} samples (~{hz:.1f} Hz){note}")
 
         doc["devices"][device.name] = IMU_entry
@@ -222,6 +222,17 @@ async def run_trial(devices, label, meta_data, trial_index):
 # ----------------------------------- Menu -----------------------------------
 async def ask(prompt):
     return input(prompt).strip()
+
+
+def load_normalisation(path):
+    """JSON mapping feature names to participant mean and sample std."""
+    with open(path, encoding="utf-8") as source:
+        stats = json.load(source)
+    mean = pd.Series(stats["mean"]).reindex(FEATURE_COLUMNS)
+    std = pd.Series(stats["std"]).reindex(FEATURE_COLUMNS)
+    if not np.isfinite(mean).all() or not np.isfinite(std).all() or (std < 0).any():
+        raise ValueError("Calibration file doesn't match the current features. Re-run calibration.")
+    return mean, std
 
 
 async def main():
@@ -264,7 +275,6 @@ async def main():
 
             elif choice == inference_choice:
                 try:
-                    from realtime_inference import calibration_path, load_normalisation, run_inference
                     default_path = calibration_path(meta_data["participant"])
                     if default_path.exists():
                         print(f"Using saved calibration for {meta_data['participant']}.")
@@ -274,31 +284,31 @@ async def main():
                         stats_path = (await ask("Or enter an existing normalisation JSON path (Enter to cancel): ")).strip('"')
                         if not stats_path:
                             continue
+
                     mean, std = load_normalisation(stats_path)
                     await run_inference(devices, mean, std)
+
                 except Exception as e:
                     print("Inference error:", e)
 
             elif choice == calibration_choice:
                 try:
-                    from realtime_inference import run_calibration
                     await run_calibration(devices, meta_data.copy(), run_trial)
                 except Exception as e:
                     print("Calibration error:", e)
 
             elif choice in options:
                 connected = [device for device in devices if device.client.is_connected]
-                # if len(connected) < 2:
-                #     print("Error: connect at least 2 devices first (option 1).")
-                #     continue
                 label = options[choice]
                 key = (meta_data["participant"], meta_data["session"], label)
                 idx = trial_counts.get(key, 0) + 1
+
                 try:
                     doc = await run_trial(connected, label, meta_data, idx)
                 except Exception as e:
                     print("Error during trial:", e)
                     continue
+
                 if (await ask("Save this trial? [Y/n]: ")).lower() != "n":
                     collection.insert_one(doc)
                     trial_counts[key] = idx
