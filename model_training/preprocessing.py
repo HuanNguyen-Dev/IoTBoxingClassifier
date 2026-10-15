@@ -28,12 +28,13 @@ MIN_PURITY = 0.8
 
 ALPHA = SAMPLING_PERIOD / (0.05 + SAMPLING_PERIOD)
 
+# ----------------------------- Feature Functions -----------------------------
+
 def lowpass(x, zi=None):
-    """y[n] = a*x[n] + (1-a)*y[n-1], applied to a whole array."""
     b, a = [ALPHA], [1, -(1 - ALPHA)]
     if zi is None:
         return lfilter(b, a, x)
-    return lfilter(b, a, x, zi=zi)   # returns (y, zf) so state carries across chunks
+    return lfilter(b, a, x, zi=zi)
 
 
 def freq_features(signal, fs=FS, n_fft=256):
@@ -84,6 +85,7 @@ def extract_features(signal):
         return {k: np.nan for k in keys}
 
     flat = signal.std() < 1e-9   # skew/kurtosis are undefined for a constant signal
+
     return {
         'mean': signal.mean(),
         'std': signal.std(),
@@ -100,32 +102,23 @@ def extract_features(signal):
         **freq_features(signal),
     }
 
+
+# ----------------------------- Window Functions -----------------------------
+
 def window_features(sig, s, e):
-    """sig: flat dict like 'ax_l', 'accmag_r' (already filtered, magnitudes added)."""
     feat = {}
+
+    # Single channel features
     for key, x in sig.items():
         for name, v in extract_features(x[s:e]).items():
             feat[f'{key}_{name}'] = v
             
+    # Cross channel features
     for suffix in ('_l', '_r'):
         win = np.column_stack([sig[f'{ch}{suffix}'][s:e] for ch in ALL_CHANNELS])
         feat.update(correlation_features(win, channels=ALL_CHANNELS, prefix=suffix[1:] + '_'))
         
     return feat
-
-def combine_devices(devices):
-    """{device_name: {t_dev_ms, ax, ...}} -> flat row with _l/_r suffixes (as the notebook loader did)."""
-    combined = {}
-    for name, data in devices.items():
-        if "Right" in name:
-            suffix = "_r"
-        elif "Left" in name:
-            suffix = "_l"
-        else:
-            raise ValueError(f"Device name '{name}' does not include Left or Right")
-        combined |= {f"{k}{suffix}": v for k, v in data.items()}
-    return combined
-
 
 def to_grid(row):
     """Both hands on a common 100 Hz grid + per-sample labels."""
@@ -153,7 +146,6 @@ def add_magnitudes(sig):
 
 
 def prepare_signals(row, filt=True):
-    """The one pipeline: grid -> lowpass whole recording -> magnitudes."""
     sig, labels = to_grid(row)
     if filt:
         sig = {k: lowpass(v) for k, v in sig.items()}
@@ -163,24 +155,27 @@ def prepare_signals(row, filt=True):
 def make_windows(row, record_id, WIN=WIN, filt=True):
     sig, labels = prepare_signals(row, filt)
     out = []
+
     for s in range(0, len(labels) - WIN + 1, STRIDE):
         w_labels = labels[s:s + WIN]
         valid = w_labels[w_labels != None]
         if len(valid) < MIN_PURITY * WIN:
             continue
+
         vals, counts = np.unique(valid, return_counts=True)
         label, purity = vals[counts.argmax()], counts.max() / WIN
         if purity < MIN_PURITY:
             continue
+
         feat = {'record_id': record_id, 'participant': row['participant'],
                 'label': label, 'purity': purity, 't_start': s / FS}
         feat.update(window_features(sig, s, s + WIN))
         out.append(feat)
+
     return out
 
 
 def latest_window_frame(row):
-    """Live use: features for the most recent WIN grid samples. None if too short."""
     sig, _ = prepare_signals(row)
     n = len(next(iter(sig.values())))
     if n < WIN:
@@ -188,9 +183,10 @@ def latest_window_frame(row):
     return pd.DataFrame([window_features(sig, n - WIN, n)])
 
 
+# ----------------------------- Normalisation Functions -----------------------------
+
 def normalise(features, mean, std):
     return (features - mean) / (std + 1e-8)
-
 
 def per_user_norm(df):
     out = df.copy()

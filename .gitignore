@@ -1,7 +1,9 @@
-models/
+model_training/models/
 figures/
 data_collection/calibrations/
 __pycache__/
 
 *checkpoint.ipynb
 *checkpoint.py
+
+.env
