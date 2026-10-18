@@ -213,7 +213,7 @@ async def run_trial(devices, label, meta_data, trial_index):
                 "t_dev_ms": [current_t_dev - start_t_dev for current_t_dev in device.t_dev]
             }
 
-        print(f"    {device.name}: {n} samples (~{hz:.1f} Hz){note}")
+        print(f"    {device.name}: {n} samples (~{hz:.1f} Hz)")
 
         doc["devices"][device.name] = IMU_entry
     return doc
