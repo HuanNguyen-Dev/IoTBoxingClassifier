@@ -1,4 +1,6 @@
 model_training/models/
+model_training/data/
+
 figures/
 data_collection/calibrations/
 __pycache__/
