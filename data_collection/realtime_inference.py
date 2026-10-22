@@ -72,13 +72,22 @@ async def run_calibration(devices, meta_data, run_trial):
     print("Follow the countdown and punch once when prompted; rest between punches.")
     schedule = ["rest"] + [label for label in punches for _ in range(3)]
 
-    for index, label in enumerate(schedule, 1):
+    index = 1
+    while index <= len(schedule):
+        label = schedule[index - 1]
         print(f"\nCalibration trial {index}/{len(schedule)}: {label}")
+        if not input("Type y to record, or press Enter to exit calibration: ").strip():
+            print("Calibration cancelled; previous calibration was kept.")
+            return
 
         try:
             doc = await run_trial(list(hands.values()), label, meta_data, index)
         finally:
             await asyncio.gather(*(d.stop_stream() for d in hands.values()), return_exceptions=True)
+
+        if input("Keep this trial? [Y/n]: ").strip().lower() in ("n", "no"):
+            print("Discarded. Repeat this calibration trial.")
+            continue
 
         for segment in doc["label_timeline"]:
             seg_len = segment["end"] - segment["start"]
@@ -101,6 +110,8 @@ async def run_calibration(devices, meta_data, run_trial):
 
                 frames.append(feature_frame(windows))
                 w += CAL_STRIDE_S
+
+        index += 1
 
     if not frames:
         raise ValueError("Calibration produced no windows; repeat calibration.")
